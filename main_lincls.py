@@ -45,7 +45,7 @@ parser.add_argument('--epochs', default=90, type=int, metavar='N',
                     help='number of total epochs to run')
 parser.add_argument('--start-epoch', default=0, type=int, metavar='N',
                     help='manual epoch number (useful on restarts)')
-parser.add_argument('-b', '--batch-size', default=4096, type=int,
+parser.add_argument('-b', '--batch-size', default=256, type=int,
                     metavar='N',
                     help='mini-batch size (default: 4096), this is the total '
                          'batch size of all GPUs on the current node when '
@@ -168,11 +168,15 @@ def main_worker(gpu, ngpus_per_node, args):
 
             # rename moco pre-trained keys
             state_dict = checkpoint['state_dict']
+            print(state_dict.keys())
+            print("break")
+            #model_state_dict=model['state_dict']
+            #print(model_state_dict.keys())
             for k in list(state_dict.keys()):
                 # retain only encoder up to before the embedding layer
-                if k.startswith('module.encoder') and not k.startswith('module.encoder.fc'):
+                if k.startswith('encoder') and not k.startswith('encoder.fc'):
                     # remove prefix
-                    state_dict[k[len("module.encoder."):]] = state_dict[k]
+                    state_dict[k[len("encoder."):]] = state_dict[k]
                 # delete renamed or unused k
                 del state_dict[k]
 

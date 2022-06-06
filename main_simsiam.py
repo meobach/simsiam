@@ -74,7 +74,7 @@ parser.add_argument('--dist-backend', default='nccl', type=str,
                     help='distributed backend')
 parser.add_argument('--seed', default=None, type=int,
                     help='seed for initializing training. ')
-parser.add_argument('--gpu', default=None, type=int,
+parser.add_argument('--gpu', default=0, type=int,
                     help='GPU id to use.')
 parser.add_argument('--multiprocessing-distributed', action='store_true',
                     help='Use multi-processing distributed training to launch '
@@ -121,6 +121,7 @@ def main():
         # main_worker process function
         mp.spawn(main_worker, nprocs=ngpus_per_node, args=(ngpus_per_node, args))
     else:
+        print(args.gpu)
         # Simply call main_worker function
         main_worker(args.gpu, ngpus_per_node, args)
 
@@ -170,7 +171,7 @@ def main_worker(gpu, ngpus_per_node, args):
             # ourselves based on the total number of GPUs we have
             args.batch_size = int(args.batch_size / ngpus_per_node)
             args.workers = int((args.workers + ngpus_per_node - 1) / ngpus_per_node)
-            model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[args.gpu])
+            #model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[args.gpu])
         else:
             model.cuda()
             # DistributedDataParallel will divide and allocate batch_size to all
@@ -180,7 +181,7 @@ def main_worker(gpu, ngpus_per_node, args):
         torch.cuda.set_device(args.gpu)
         model = model.cuda(args.gpu)
         # comment out the following line for debugging
-        raise NotImplementedError("Only DistributedDataParallel is supported.")
+        #raise NotImplementedError("Only DistributedDataParallel is supported.")
     else:
         # AllGather implementation (batch shuffle, queue update, etc.) in
         # this code only supports DistributedDataParallel.
@@ -191,8 +192,8 @@ def main_worker(gpu, ngpus_per_node, args):
     criterion = nn.CosineSimilarity(dim=1).cuda(args.gpu)
 
     if args.fix_pred_lr:
-        optim_params = [{'params': model.module.encoder.parameters(), 'fix_lr': False},
-                        {'params': model.module.predictor.parameters(), 'fix_lr': True}]
+        optim_params = [{'params': model.encoder.parameters(), 'fix_lr': False},
+                        {'params': model.predictor.parameters(), 'fix_lr': True}]
     else:
         optim_params = model.parameters()
 
@@ -227,7 +228,7 @@ def main_worker(gpu, ngpus_per_node, args):
 
     # MoCo v2's aug: similar to SimCLR https://arxiv.org/abs/2002.05709
     augmentation = [
-        transforms.RandomResizedCrop(224, scale=(0.2, 1.)),
+        transforms.RandomResizedCrop(32, scale=(0.2, 1.)),
         transforms.RandomApply([
             transforms.ColorJitter(0.4, 0.4, 0.4, 0.1)  # not strengthened
         ], p=0.8),
