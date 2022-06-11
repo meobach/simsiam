@@ -50,7 +50,7 @@ parser.add_argument('-b', '--batch-size', default=256, type=int,
                     help='mini-batch size (default: 4096), this is the total '
                          'batch size of all GPUs on the current node when '
                          'using Data Parallel or Distributed Data Parallel')
-parser.add_argument('--lr', '--learning-rate', default=0.1, type=float,
+parser.add_argument('--lr', '--learning-rate', default=30, type=float,
                     metavar='LR', help='initial (base) learning rate', dest='lr')
 parser.add_argument('--momentum', default=0.9, type=float, metavar='M',
                     help='momentum')
@@ -174,9 +174,9 @@ def main_worker(gpu, ngpus_per_node, args):
             #print(model_state_dict.keys())
             for k in list(state_dict.keys()):
                 # retain only encoder up to before the embedding layer
-                if k.startswith('encoder') and not k.startswith('encoder.fc'):
+                if k.startswith('module.encoder') and not k.startswith('module.encoder.fc'):
                     # remove prefix
-                    state_dict[k[len("encoder."):]] = state_dict[k]
+                    state_dict[k[len("module.encoder."):]] = state_dict[k]
                 # delete renamed or unused k
                 del state_dict[k]
 
@@ -312,8 +312,7 @@ def main_worker(gpu, ngpus_per_node, args):
         is_best = acc1 > best_acc1
         best_acc1 = max(acc1, best_acc1)
 
-        if not args.multiprocessing_distributed or (args.multiprocessing_distributed
-                and args.rank % ngpus_per_node == 0):
+        if epoch%20==0:
             save_checkpoint({
                 'epoch': epoch + 1,
                 'arch': args.arch,

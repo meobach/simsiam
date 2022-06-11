@@ -7,15 +7,21 @@
 
 import argparse
 import builtins
+from pickletools import uint8
+from statistics import mode
+import torch.nn.functional as F
 import math
 import os
+from PIL import Image
 import random
 import shutil
 import time
 import warnings
-
+from tqdm import tqdm
+from torchvision.datasets import CIFAR10
 import torch
 import torch.nn as nn
+import cv2
 import torch.nn.parallel
 import torch.backends.cudnn as cudnn
 import torch.distributed as dist
@@ -26,15 +32,19 @@ import torch.utils.data.distributed
 import torchvision.transforms as transforms
 import torchvision.datasets as datasets
 import torchvision.models as models
-
+import numpy as np
 import simsiam.loader
 import simsiam.builder
-
+import logging
+logging.basicConfig(filename='drive/MyDrive/SSL/cifar10_v1_1.log',filemode="w", level=logging.DEBUG)
+logger = logging.getLogger()
 model_names = sorted(name for name in models.__dict__
     if name.islower() and not name.startswith("__")
     and callable(models.__dict__[name]))
 
 parser = argparse.ArgumentParser(description='PyTorch ImageNet Training')
+parser.add_argument('--knn-k', default=200, type=int, help='k in kNN monitor')
+parser.add_argument('--knn-t', default=0.1, type=float, help='softmax temperature in kNN monitor; could be different with moco-t')
 parser.add_argument('data', metavar='DIR',
                     help='path to dataset')
 parser.add_argument('-a', '--arch', metavar='ARCH', default='resnet50',
@@ -44,9 +54,9 @@ parser.add_argument('-a', '--arch', metavar='ARCH', default='resnet50',
                         ' (default: resnet50)')
 parser.add_argument('-j', '--workers', default=32, type=int, metavar='N',
                     help='number of data loading workers (default: 32)')
-parser.add_argument('--epochs', default=100, type=int, metavar='N',
+parser.add_argument('--epochs', default=1000, type=int, metavar='N',
                     help='number of total epochs to run')
-parser.add_argument('--start-epoch', default=0, type=int, metavar='N',
+parser.add_argument('--start-epoch', default=1, type=int, metavar='N',
                     help='manual epoch number (useful on restarts)')
 parser.add_argument('-b', '--batch-size', default=512, type=int,
                     metavar='N',
@@ -125,7 +135,72 @@ def main():
         # Simply call main_worker function
         main_worker(args.gpu, ngpus_per_node, args)
 
+class CIFAR10Pair(CIFAR10):
+    """CIFAR10 Dataset.
+    """
+    def concat(self,img_list):
+        dst = Image.new('RGB', (64,64))
+        img=img_list[0]
+        print(img.size())
+        print(type(img))
+        dst.paste(img_list[0], (0, 0))
+        dst.paste(img_list[1], (32,0))
+        dst.paste(img_list[2], (32,32))
+        dst.paste(img_list[3], (0,32))
+        return dst
+    def __getitem__(self, index):
+        img_ori,index_class_ori = Image.fromarray(self.data[index]),self.targets[index]
+        while(True):
+            positive_index=random.randrange(50000)
+            positive_class=self.targets[positive_index]
+            if(positive_class==index_class_ori):
+                break
+        positive_img=Image.fromarray(self.data[positive_index])
 
+        #img1 = Image.fromarray(img1)
+        #print(len(self.data))
+        # index_img2=random.randrange(50000)
+        # img2=self.data[index_img2]
+        # weight1=random.uniform(0.3,0.7)
+        # img1_blend=Image.fromarray(cv2.addWeighted(img1, weight1, img2, 1-weight1, 0))
+        # weight2=random.uniform(0.3,0.7)
+        # img2_blend=Image.fromarray(cv2.addWeighted(img1, weight2, img2, 1-weight2, 0))
+        if self.transform is not None:
+            # im_1_v1=self.transform(img)
+            # im_1_v2=self.transform(img)
+            # im_1_v3=self.transform(img)
+            # im_1_v4=self.transform(img)
+            # im_1_hor_1=torch.cat((im_1_v1,im_1_v2),1)
+            # im_1_hor_2=torch.cat((im_1_v3,im_1_v4),1)
+            # im_1=torch.cat((im_1_hor_1,im_1_hor_2),2)
+            # im_2_v1=self.transform(img)
+            # im_2_v2=self.transform(img)
+            # im_2_v3=self.transform(img)
+            # im_2_v4=self.transform(img)
+            # im_2_hor_1=torch.cat((im_2_v1,im_2_v2),1)
+            # im_2_hor_2=torch.cat((im_2_v3,im_2_v4),1)
+            # im_2=torch.cat((im_2_hor_1,im_2_hor_2),2)
+            # im_1=transforms.ToPILImage()(im_1)
+            # im_2=transforms.ToPILImage()(im_2)
+            # im_1=train_transform_after(im_1)
+            # im_2=train_transform_after(im_2)
+            im_1=self.transform(img_ori)
+            im_2=self.transform(positive_img)
+            
+        return im_1, im_2
+
+# train_transform_after = transforms.Compose([
+#     transforms.RandomHorizontalFlip(p=0.5),
+#     transforms.RandomApply([transforms.ColorJitter(0.4, 0.4, 0.4, 0.1)], p=0.8),
+#     transforms.RandomGrayscale(p=0.2),
+#     transforms.ToTensor(),
+#     transforms.Normalize([0.4914, 0.4822, 0.4465], [0.2023, 0.1994, 0.2010])])
+
+# test_transform = transforms.Compose([
+#     transforms.ToTensor(),
+#     transforms.Normalize([0.4914, 0.4822, 0.4465], [0.2023, 0.1994, 0.2010])])
+normalize_mode=transforms.Compose(
+        [transforms.Normalize([0.4914, 0.4822, 0.4465], [0.2023, 0.1994, 0.2010])])
 def main_worker(gpu, ngpus_per_node, args):
     args.gpu = gpu
 
@@ -178,15 +253,28 @@ def main_worker(gpu, ngpus_per_node, args):
             # available GPUs if device_ids are not set
             model = torch.nn.parallel.DistributedDataParallel(model)
     elif args.gpu is not None:
+        #load weight from pre-trained imagenet
+        # model_weight = models.resnet18(pretrained=True)
+        # state_dict_weight=dict(model_weight.state_dict())
+        # #print(state_dict_weight.keys())
+        # state_dict_model=dict(model.state_dict())
+        # #print(state_dict_model.keys())
+        # for key in state_dict_weight:
+        #     if("fc" not in key):
+        #         state_dict_model["encoder."+key]=state_dict_weight[key]
+        # model.load_state_dict(state_dict_model)
         torch.cuda.set_device(args.gpu)
+        #model.load_state_dict(state_dict_model)
         model = model.cuda(args.gpu)
+        #del model_weight
+
         # comment out the following line for debugging
         #raise NotImplementedError("Only DistributedDataParallel is supported.")
     else:
         # AllGather implementation (batch shuffle, queue update, etc.) in
         # this code only supports DistributedDataParallel.
         raise NotImplementedError("Only DistributedDataParallel is supported.")
-    print(model) # print model after SyncBatchNorm
+    #print(model) # print model after SyncBatchNorm
 
     # define loss function (criterion) and optimizer
     criterion = nn.CosineSimilarity(dim=1).cuda(args.gpu)
@@ -222,54 +310,117 @@ def main_worker(gpu, ngpus_per_node, args):
     cudnn.benchmark = True
 
     # Data loading code
-    traindir = os.path.join(args.data, 'train')
-    normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406],
-                                     std=[0.229, 0.224, 0.225])
+    # traindir = os.path.join(args.data, 'train')
+    # normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406],
+    #                                  std=[0.229, 0.224, 0.225])
 
-    # MoCo v2's aug: similar to SimCLR https://arxiv.org/abs/2002.05709
-    augmentation = [
-        transforms.RandomResizedCrop(32, scale=(0.2, 1.)),
-        transforms.RandomApply([
-            transforms.ColorJitter(0.4, 0.4, 0.4, 0.1)  # not strengthened
-        ], p=0.8),
-        transforms.RandomGrayscale(p=0.2),
-        transforms.RandomApply([simsiam.loader.GaussianBlur([.1, 2.])], p=0.5),
-        transforms.RandomHorizontalFlip(),
-        transforms.ToTensor(),
-        normalize
-    ]
+    # # MoCo v2's aug: similar to SimCLR https://arxiv.org/abs/2002.05709
+    # augmentation = [
+    #     transforms.RandomResizedCrop(64, scale=(0.2, 1.)),
+    #     transforms.RandomApply([
+    #         transforms.ColorJitter(0.4, 0.4, 0.4, 0.1)  # not strengthened
+    #     ], p=0.8),
+    #     transforms.RandomGrayscale(p=0.2),
+    #     #transforms.RandomApply([simsiam.loader.GaussianBlur([.1, 2.])], p=0.5),
+    #     transforms.RandomHorizontalFlip(),
+    #     transforms.ToTensor(),
+    #     normalize
+    # ]
 
-    train_dataset = datasets.ImageFolder(
-        traindir,
-        simsiam.loader.TwoCropsTransform(transforms.Compose(augmentation)))
+    # train_dataset = datasets.ImageFolder(
+    #     traindir,
+    #     simsiam.loader.TwoCropsTransform(transforms.Compose(augmentation)))
+    train_transform = transforms.Compose([
+    transforms.RandomResizedCrop(32,scale=(0.5,1)),
+    transforms.RandomHorizontalFlip(p=0.5),
+    transforms.RandomApply([transforms.ColorJitter(0.4, 0.4, 0.4, 0.1)], p=0.8),
+    transforms.RandomGrayscale(p=0.2),
+    transforms.ToTensor(),
+    transforms.Normalize([0.4914, 0.4822, 0.4465], [0.2023, 0.1994, 0.2010])])
+    test_transform = transforms.Compose([
+    transforms.ToTensor(),
+    transforms.Normalize([0.4914, 0.4822, 0.4465], [0.2023, 0.1994, 0.2010])])
 
-    if args.distributed:
-        train_sampler = torch.utils.data.distributed.DistributedSampler(train_dataset)
-    else:
-        train_sampler = None
+    train_data = CIFAR10Pair(root='data', train=True, transform=train_transform, download=True)
+    train_loader = torch.utils.data.DataLoader(train_data, batch_size=args.batch_size, shuffle=True, num_workers=args.workers, pin_memory=True, drop_last=True)
+    print(train_loader)
+    memory_data = CIFAR10(root='data', train=True, transform=test_transform, download=True)
+    memory_loader = torch.utils.data.DataLoader(memory_data, batch_size=args.batch_size, shuffle=False, num_workers=16, pin_memory=True)
 
-    train_loader = torch.utils.data.DataLoader(
-        train_dataset, batch_size=args.batch_size, shuffle=(train_sampler is None),
-        num_workers=args.workers, pin_memory=True, sampler=train_sampler, drop_last=True)
+    test_data = CIFAR10(root='data', train=False, transform=test_transform, download=True)
+    test_loader = torch.utils.data.DataLoader(test_data, batch_size=args.batch_size, shuffle=False, num_workers=16, pin_memory=True)
 
+    # if args.distributed:
+    #     train_sampler = torch.utils.data.distributed.DistributedSampler(train_dataset)
+    # else:
+    train_sampler = None
+
+    # train_loader = torch.utils.data.DataLoader(
+    #     train_dataset, batch_size=args.batch_size, shuffle=True,
+    #     num_workers=args.workers, pin_memory=True, sampler=train_sampler, drop_last=True)
     for epoch in range(args.start_epoch, args.epochs):
         if args.distributed:
             train_sampler.set_epoch(epoch)
         adjust_learning_rate(optimizer, init_lr, epoch, args)
-
         # train for one epoch
         train(train_loader, model, criterion, optimizer, epoch, args)
-
-        if not args.multiprocessing_distributed or (args.multiprocessing_distributed
-                and args.rank % ngpus_per_node == 0):
+        test(model.encoder, memory_loader, test_loader, epoch, args)
+        
+        if epoch%50==0:
             save_checkpoint({
                 'epoch': epoch + 1,
                 'arch': args.arch,
                 'state_dict': model.state_dict(),
                 'optimizer' : optimizer.state_dict(),
-            }, is_best=False, filename='checkpoint_{:04d}.pth.tar'.format(epoch))
+            }, is_best=False, filename='drive/MyDrive/SSL/checkpoint_{:04d}.pth.tar'.format(epoch))
 
 
+def knn_predict(feature, feature_bank, feature_labels, classes, knn_k, knn_t):
+    # compute cos similarity between each feature vector and feature bank ---> [B, N]
+    sim_matrix = torch.mm(feature, feature_bank)
+    # [B, K]
+    sim_weight, sim_indices = sim_matrix.topk(k=knn_k, dim=-1)
+    # [B, K]
+    sim_labels = torch.gather(feature_labels.expand(feature.size(0), -1), dim=-1, index=sim_indices)
+    sim_weight = (sim_weight / knn_t).exp()
+
+    # counts for each class
+    one_hot_label = torch.zeros(feature.size(0) * knn_k, classes, device=sim_labels.device)
+    # [B*K, C]
+    one_hot_label = one_hot_label.scatter(dim=-1, index=sim_labels.view(-1, 1), value=1.0)
+    # weighted score ---> [B, C]
+    pred_scores = torch.sum(one_hot_label.view(feature.size(0), -1, classes) * sim_weight.unsqueeze(dim=-1), dim=1)
+
+    pred_labels = pred_scores.argsort(dim=-1, descending=True)
+    return pred_labels
+def test(net, memory_data_loader, test_data_loader, epoch, args):
+    net.eval()
+    classes = len(memory_data_loader.dataset.classes)
+    total_top1, total_top5, total_num, feature_bank = 0.0, 0.0, 0, []
+    with torch.no_grad():
+        # generate feature bank
+        for data, target in tqdm(memory_data_loader, desc='Feature extracting'):
+            feature = net(data.cuda(non_blocking=True))
+            feature = F.normalize(feature, dim=1)
+            feature_bank.append(feature)
+        # [D, N]
+        feature_bank = torch.cat(feature_bank, dim=0).t().contiguous()
+        # [N]
+        feature_labels = torch.tensor(memory_data_loader.dataset.targets, device=feature_bank.device)
+        # loop test data to predict the label by weighted knn search
+        test_bar = tqdm(test_data_loader)
+        for data, target in test_bar:
+            data, target = data.cuda(non_blocking=True), target.cuda(non_blocking=True)
+            feature = net(data)
+            feature = F.normalize(feature, dim=1)
+            
+            pred_labels = knn_predict(feature, feature_bank, feature_labels, classes, args.knn_k, args.knn_t)
+
+            total_num += data.size(0)
+            total_top1 += (pred_labels[:, 0] == target).float().sum().item()
+            test_bar.set_description('Test Epoch: [{}/{}] Acc@1:{:.2f}%'.format(epoch, args.epochs, total_top1 / total_num * 100))
+        logger.info('Test Epoch: [{}/{}] Acc@1:{:.2f}%'.format(epoch, args.epochs, total_top1 / total_num * 100))
+    return total_top1 / total_num * 100
 def train(train_loader, model, criterion, optimizer, epoch, args):
     batch_time = AverageMeter('Time', ':6.3f')
     data_time = AverageMeter('Data', ':6.3f')
@@ -283,19 +434,26 @@ def train(train_loader, model, criterion, optimizer, epoch, args):
     model.train()
 
     end = time.time()
-    for i, (images, _) in enumerate(train_loader):
+    total_loss, total_num, train_bar = 0.0, 0, tqdm(train_loader)
+    i=0
+    for im_1, im_2 in train_bar:
+        i+=1
+        im_1, im_2 = im_1.cuda(non_blocking=True), im_2.cuda(non_blocking=True)
         # measure data loading time
         data_time.update(time.time() - end)
 
-        if args.gpu is not None:
-            images[0] = images[0].cuda(args.gpu, non_blocking=True)
-            images[1] = images[1].cuda(args.gpu, non_blocking=True)
-
+        # if args.gpu is not None:
+        #     print("Im here")
+        #     print(images[0].size())
+        #     images[0] = images[0].cuda( non_blocking=True)
+        #     images[1] = images[1].cuda( non_blocking=True)
+        # print(images[0].is_cuda)
+        # print(images[1].is_cuda)
         # compute output and loss
-        p1, p2, z1, z2 = model(x1=images[0], x2=images[1])
+        p1, p2, z1, z2 = model(x1=im_1, x2=im_2)
         loss = -(criterion(p1, z2).mean() + criterion(p2, z1).mean()) * 0.5
-
-        losses.update(loss.item(), images[0].size(0))
+                #print(loss.item())
+        losses.update(loss.item(), im_1[0].size(0))
 
         # compute gradient and do SGD step
         optimizer.zero_grad()
@@ -308,7 +466,7 @@ def train(train_loader, model, criterion, optimizer, epoch, args):
 
         if i % args.print_freq == 0:
             progress.display(i)
-
+    
 
 def save_checkpoint(state, is_best, filename='checkpoint.pth.tar'):
     torch.save(state, filename)
